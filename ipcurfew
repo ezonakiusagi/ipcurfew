@@ -72,12 +72,12 @@ ROUTE_TBL=/proc/net/route
 RULES_DIR=/etc/ipcurfew/rules.d
 IPINFO_CACHE=/var/cache/ipcurfew/ipinfo
 LOG=/var/log/ipcurfew.log
+PIDFILE=/var/run/ipcurfew.pid
 
 # URL resources
 IPECHO=http://ipecho.net/plain
 IPIFY=https://api.ipify.org
 IPINFO=http://ipinfo.io
-PIDFILE=/var/run/ipcurfew.pid
 
 ##
 ## functions
