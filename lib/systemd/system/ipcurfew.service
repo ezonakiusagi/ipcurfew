@@ -1,0 +1,15 @@
+[Unit]
+Description=IPCurfew Service Daemon
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/ipcurfew.pid
+EnvironmentFile=/etc/sysconfig/ipcurfew
+ExecStart=/usr/sbin/ipcurfew $OPTIONS
+KillMode=process
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

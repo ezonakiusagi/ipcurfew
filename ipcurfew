@@ -1,0 +1,479 @@
+#!/bin/ksh
+#
+# Copyright (C) 2016 Bond Masuda.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+#
+
+##
+## USAGE definition
+##
+# usage: ipcurfew [options]
+#   -f, --foreground	run in foreground mode. default is to run as daemon.
+#   -c, --child		internal use only. used for forking off child in daemonization
+#   -D, --daemon	internal use only. used for 2nd forking off in daemonization
+#   -L, --log-level=	logging level. 0=none,1=crit,2=normal,3=verbose,4=debug
+#
+USAGE=$'[-?\n@(#)$Id: 0.1\n]'
+USAGE+="[-author?Bond Masuda <bond.masuda@jlbond.com>]"
+USAGE+="[-copyright?Copyright (C) 2016 Bond Masuda. All Rights Reserved.]"
+USAGE+="[-license?GNU General Public License v3.]"
+USAGE+="[+NAME?ipcurfew --- ipcurfew restricts services based on your public IP.]"
+USAGE+="[+DESCRIPTION?ipcurfew restricts what services can or cannot run based "
+USAGE+="on conditional rules on the attributes of the system's public internet IP "
+USAGE+="address. It enforces these rules on start up, and then monitors the "
+USAGE+="route table for changes. If a change in route table is detected, it checks "
+USAGE+="the rules again and enforces restrictions based on any new state.]"
+USAGE+="[f:foreground?run in foreground. default is to run as daemon.]"
+USAGE+="[c:child?internal option - do not use.]"
+USAGE+="[D:daemon?internal option - do not use.]"
+USAGE+="[L:log-level]#[log-level:=2?Set the logging level.]{
+	[0?none, suppress all logging]
+	[1?critical messages only]
+	[2?normal logging level (default)]
+	[3?verbose logging]
+	[4?debug logging]
+}"
+
+##
+## settings
+##
+# global variables
+ROUTE_TBL_HASH=
+PUBLIC_IP=
+
+# option variables
+OPT_foreground=0
+OPT_log_level=2	    # default log level = 2 (normal)
+OPT_child=0
+OPT_daemon=0
+
+# timing variables
+# routing table tracking interval (in microseconds)
+ROUTE_TABLE_TRACK_INTERVAL=1000000
+# public ip tracking interval (in microseconds)
+PUBLIC_IP_TRACK_INTERVAL=1000000
+# IP info cache expiration period in days
+IPINFO_CACHE_EXPIRATION=3
+
+# path variables
+ROUTE_TBL=/proc/net/route
+RULES_DIR=/etc/ipcurfew/rules.d
+IPINFO_CACHE=/var/cache/ipcurfew/ipinfo
+LOG=/var/log/ipcurfew.log
+
+# URL resources
+IPECHO=http://ipecho.net/plain
+IPIFY=https://api.ipify.org
+IPINFO=http://ipinfo.io
+PIDFILE=/var/run/ipcurfew.pid
+
+##
+## functions
+##
+
+#------------------------------------------------------------------------------
+# description: general handler for $? values and exits on fail
+# inputs: $1="message to print on fail"
+# outputs: none
+# exit: 1 on failure
+#------------------------------------------------------------------------------
+function exit_on_error
+{
+    print -u2 "[ERROR] $1"
+    exit 1
+}
+
+#------------------------------------------------------------------------------
+# description: general logging function
+# inputs: -p [1-4,crit,normal,verbose,debug] -m "log message"
+# outputs: write log message to log file
+# return: 0=good, >0=problem
+#------------------------------------------------------------------------------
+function log_message
+{
+    # localize internal variables
+    typeset _log_priority
+    typeset _message
+
+    while getopts :p:m: inputs
+    do
+	case $inputs in
+	    p) _log_priority=$OPTARG ;;
+	    m) _message="$OPTARG" ;;
+	    *) ;;
+	esac
+    done
+
+    # we allow _log_priority to be numeric (1-4) or symbolic
+    # but we internally convert symbolic to numeric here
+    if [[ ${_log_priority} != ?(-)+([[:digit:]]) ]] ; then
+	case ${_log_priority} in
+	    crit|critical)  _log_priority=1 ;;
+	    norm|normal)    _log_priority=2 ;;
+	    verbose)	    _log_priority=3 ;;
+	    debug)	    _log_priority=4 ;;
+	    *)	exit_on_error "log_message(): invalid priority ${_log_priority}"
+		;;
+	esac
+    fi
+
+    # check that we are in reasonable range 1-4
+    if (( ${_log_priority} < 0 )) || (( ${_log_priority} > 4 )) ; then
+	exit_on_error "log_message(): log_priority ${_log_priority} is out of range"
+    fi
+
+    # only log message if ${_log_priority} < $OPT_log_level
+    if (( ${_log_priority} <= ${OPT_log_level} )) ; then
+	# set timestamp
+	TIMESTAMP=$(date +"%Y.%m.%d (%a) %H:%M:%S %Z")
+	print -- "[${TIMESTAMP}] ${_message}" >> $LOG
+    fi
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: check if $1 is a valid ip address
+# inputs: $1=ip
+# outputs: none
+# return: 0 = success, 1 = failed (not a ip address)
+#------------------------------------------------------------------------------
+function is_ipaddress
+{
+    log_message -p debug -m "call is_ipaddress($@)"
+    # must have argument
+    if [[ -z $1 ]] ; then
+	log_message -p verbose -m "is_ipaddress called without argument"
+	return 1
+    fi
+    # check for IPv4 address format
+    if [[ $1 == {1,3}([0-9])\.{1,3}([0-9])\.{1,3}([0-9])\.{1,3}([0-9]) ]] ; then
+	OIFS=$IFS
+        IFS=.
+        for octet in $1
+        do
+	    if (( $octet >= 0 )) && (( $octet <= 255 )) ; then
+		continue
+            else
+                log_message -p crit -m "$1 is not a valid IP address: $octet is not 1-255"
+                return 1
+            fi
+        done
+        IFS=$OIFS
+        return 0
+    fi
+    log_message -p crit -m "is_ipaddress(): $1 is not a valid IPv4 address"
+    return 1
+}
+
+#------------------------------------------------------------------------------
+# description: get public IP address
+# inputs: none
+# outputs: IP address (string)
+# exit: 1 on failure
+#------------------------------------------------------------------------------
+function get_publicip
+{
+    log_message -p debug -m "call getpublicip($@)"
+    curl -s ${IPECHO}
+    (( $? == 0 )) || return 1
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: get IP address information
+# inputs: $1=ipaddress
+# outputs: IP info in json
+# exit: 1 on failure
+#------------------------------------------------------------------------------
+function get_ipinfo
+{
+    log_message -p debug -m "call getipinfo($@)"
+    curl -s ${IPINFO}/${1}
+    (( $? == 0 )) || return 1
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: update IP address information cache
+# inputs: $1=ipaddress
+# outputs: none
+# exit: 1 on failure, 0 on success
+#------------------------------------------------------------------------------
+function update_ipinfo_cache
+{
+    log_message -p debug -m "call update_ipinfo_cache($@)"
+    typeset _ip=$1
+    # first remove the expired entries
+    find $IPINFO_CACHE -type f -mtime +${IPINFO_CACHE_EXPIRATION} -exec rm -f {} \;
+    # check if we have cached data for ${_ip}
+    if [[ -f ${IPINFO_CACHE}/${_ip} ]] ; then
+	# have cached entry, we're done
+	log_message -p verbose -m "update_ipinfo_cache(): found cache entry ${IPINFO_CACHE}/${_ip}"
+	return 0
+    else
+	# no cached entry, get new ip info
+	get_ipinfo ${_ip} > ${IPINFO_CACHE}/${_ip}
+	if (( $? == 0 )) ; then
+	    log_message -p verbose -m "update_ipinfo_cache(): cache update successful for ${_ip}"
+	    return 0
+	else
+	    rm -f ${IPINFO_CACHE}/${_ip}
+	    log_message -p crit -m "update_ipinfo_cache(): cache update failed for ${_ip}"
+	    return 1
+	fi
+    fi
+}
+
+#------------------------------------------------------------------------------
+# description: track public IP address
+# inputs: none
+# outputs: none
+# exit: 
+#------------------------------------------------------------------------------
+function track_publicip
+{
+    log_message -p debug -m "call track_publicip($@)"
+    trap 'sig_handler track_publicip' TERM
+    unset PUBLIC_IP
+    while true
+    do
+	PUBLIC_IP=$(get_publicip)
+	if is_ipaddress $PUBLIC_IP ; then
+	    RUN_mode=enforce_curfew
+	    return
+	else
+	    log_message -p crit -m "track_publicip(): got malformed public IP address [$PUBLIC_IP]."
+	    log_message -p crit -m "track_publicip(): skipping IP curfew enforcement."
+	fi
+	usleep $PUBLIC_IP_TRACK_INTERVAL
+    done
+}
+
+#------------------------------------------------------------------------------
+# description: enforce IP curfew
+# inputs: $1=public_ip
+# outputs: none
+# exit: 
+#------------------------------------------------------------------------------
+function enforce_curfew
+{
+    log_message -p debug -m "call enforce_curfew($@)"
+    trap 'sig_handler enforce_curfew' TERM
+    typeset _public_ip=$1
+    update_ipinfo_cache ${_public_ip}
+    for rule in $(ls $RULES_DIR/*.rule)
+    do
+	log_message -p debug -m "enforce_curfew(): applying rule ${rule} to ${_public_ip}"
+	apply_curfew_rule "${_public_ip}" "${rule}"
+    done
+    RUN_mode=track_route_table
+    return
+}
+
+#------------------------------------------------------------------------------
+# description: track route table
+# inputs: none
+# outputs: none
+# exit: 
+#------------------------------------------------------------------------------
+function track_route_table
+{
+    log_message -p debug -m "call track_route_table($@)"
+    trap 'sig_handler track_route_table' TERM
+    while true
+    do
+	if [[ -z $ROUTE_TBL_HASH ]] ; then
+	    log_message -p verbose -m "initial run of track_route_table. getting hash of route table"
+	    ROUTE_TBL_HASH=$(sha256sum /proc/net/route | awk '{print $1}')
+	else
+	    if [[ $ROUTE_TBL_HASH != $(sha256sum /proc/net/route | awk '{print $1}') ]] ; then
+		log_message -p normal -m "route table change detected."
+		ROUTE_TBL_HASH=$(sha256sum /proc/net/route | awk '{print $1}')
+		#track_publicip
+		RUN_mode=track_publicip
+		return
+	    fi
+	fi
+	usleep $ROUTE_TABLE_TRACK_INTERVAL
+    done
+}
+
+#------------------------------------------------------------------------------
+# description: apply curfew rule on IP
+# inputs: $1=public_ip $2=rule_file
+# outputs: none
+# exit: 
+#------------------------------------------------------------------------------
+function apply_curfew_rule
+{
+    log_message -p debug -m "call apply_curfew_rule()"
+    log_message -p debug -m "apply_curfew_rule(): public_ip = $1"
+    log_message -p debug -m "apply_curfew_rule(): rule_file = $2"
+    typeset _public_ip=$1
+    typeset _rule_file=$2
+    typeset key
+    typeset value
+    typeset pattern
+    typeset action
+
+    for filter in $(grep ^filter= ${_rule_file}|sed s/^filter=//)
+    do
+	key=$(print $filter|awk -F= '{print $1}')
+	pattern=$(print $filter|awk -F= '{print $2}')
+	value=$(awk -F: -v key=$key '$0 ~ ""key"" {print $2}' ${IPINFO_CACHE}/${_public_ip} \
+	    | sed s/^[[:space:]]*\"// | sed s/\",*$//)
+	log_message -p debug -m "apply_curfew_rule(): key=$key value=$value pattern=$pattern"
+	if [[ $(print $value | grep -c -E "$pattern") -eq 1 ]] ; then
+	    # on 1st match, run on_match_action, and exit
+	    action=$(grep ^on_match_action= ${_rule_file}|sed s/^on_match_action=//)
+	    if [[ -n $action ]] ; then
+		log_message -p debug -m "apply_curfew_rule(): running on_match_action = $action"
+		$action
+	    else
+		# $action was empty
+		log_message -p crit -m "apply_curfew_rule(): could not find on_match_action for ${_rule_file}"
+		return 1
+	    fi
+	    return 0
+	fi
+    done
+
+    # if we made it here, means none of the filters matched.
+    # we run no_match_action
+    action=$(grep ^no_match_action= ${_rule_file}|sed s/^no_match_action=//)
+    if [[ -n $action ]] ; then
+	log_message -p debug -m "apply_curfew_rule(): running no_match_action = $action"
+	$action
+    else
+	# $action was empty
+	log_message -p crit -m "apply_curfew_rule(): could not find no_match_action for ${_rule_file}"
+	return 1
+    fi
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# description: handle signals
+# inputs: none
+# outputs: none
+# exit: 
+#------------------------------------------------------------------------------
+function sig_handler
+{
+    log_message -p debug -m "call sig_handler($@)"
+    if [[ -z $1 ]] && [[ -f $PIDFILE ]] ; then
+	log_message -p debug -m "sig_handler(): deleting pid file"
+	rm -f $PIDFILE
+    fi
+    exit 0
+}
+
+##
+## set signal traps
+##
+trap 'sig_handler' TERM INT EXIT
+
+##
+## main
+##
+
+SELF=$0
+PID=$$
+PWD="$(cd "$(dirname $0)" && pwd)"
+PROG=$(basename $0)
+
+# process command line args
+while getopts "$USAGE" option
+do
+    case $option in
+        f|foreground)	OPT_foreground=1 ;;
+	L|log-level)	OPT_log_level=$OPTARG ;;
+	c|child)	OPT_child=1 ;;
+	D|daemon)	OPT_daemon=1 ;;
+    esac
+done
+
+# some validation: OPT_log_level = 0..4
+if (( $OPT_log_level < 0 )) || (( $OPT_log_level > 4 )) ; then
+    print -u2 "[ERROR] log-level is out of range: $OPT_log_level"
+    exit 1
+fi
+
+# if we are in "child" mode, fork again into daemon mode
+if (( $OPT_child == 1 )) ; then
+    # fork again and redirect stdin,stdout,stderr to /dev/null
+    ${PWD}/${PROG} --daemon --log-level $OPT_log_level </dev/null >/dev/null 2>/dev/null &
+    exit 0
+fi
+
+# if we are not in "foreground" mode AND not "daemon" mode, fork off
+# as child in new session id to begin daemonization process
+if (( $OPT_foreground != 1 )) && (( $OPT_daemon != 1 )) ; then
+    setsid ${PWD}/${PROG} -c -L $OPT_log_level &
+    exit 0
+fi
+
+# we get here only if we're in foreground mode or in daemon mode
+# in daemon mode, we need to perform some more tasks:
+if (( $OPT_daemon == 1 )) ; then
+    # chdir / so we don't tie up any directories
+    cd /
+    # set umask 0 so we have compete control of perms
+    umask 0
+    # close stdin,stdout,&stderr
+    exec 0<&-
+    exec 1>&-
+    exec 2>&-
+    # open new stdin,stdout,&stderr
+    exec 0</dev/null
+    exec 1>>$LOG
+    exec 2>>$LOG
+fi 
+
+# check for existing instance and setup pid file
+if [[ -f $PIDFILE ]] ; then
+    print -u2 "[ERROR] found existing pid file $PIDFILE"
+    exit 1
+fi
+print $PID > $PIDFILE
+chmod 600 $PIDFILE
+
+##
+## now, do the real work.
+##
+
+# start public ip tracking
+RUN_mode=track_publicip
+while true
+do
+    case $RUN_mode in
+	track_publicip)
+	    track_publicip
+	    ;;
+	enforce_curfew)
+	    enforce_curfew $PUBLIC_IP
+	    ;;
+	track_route_table)
+	    track_route_table
+	    ;;
+    esac
+done
+
+# the end
+exit 0
+
+##
+## end of program
+##

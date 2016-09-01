@@ -1,0 +1,24 @@
+# IP info attribute filter
+#
+# Each filter entry must start with "filter=" and start at the beginning of the line.
+#
+# Each filter is a key=value pair, where key can be "ip", "hostname", "city", "region",
+# "country", "loc", "org", or "postal". The 'value' part is a string that will be used by
+# grep -E to match against the attribute's value. Hence, extended regular expressions
+# can be used. Since the "=" sign is used to parse the string, it is a good idea to
+# avoid using "=" in the actual pattern.
+#
+# multiple filter= entries can be listed, and each one will be tested against the IP
+# info attribute. the matching logic is 'OR'd, so any single match will trigger an 
+# "on_match_action".
+filter=org=Your_ISP
+filter=ip=Your_IP
+
+# Actions
+#
+# "on_match_action" - if any of the filters match, the string specified by this setting
+# will be executed as a command.
+on_match_action=systemctl stop transmission-daemon.service
+# "no_match_action" - if none of the filters match, the string specified by this setting
+# will be executed as a command.
+no_match_action=systemctl start transmission-daemon.service
