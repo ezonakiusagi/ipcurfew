@@ -1,6 +1,6 @@
 #!/bin/ksh
 #
-# Copyright (C) 2016 Bond Masuda.
+# Copyright (C) 2016 Art of Server.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,8 +26,8 @@
 #   -L, --log-level=	logging level. 0=none,1=crit,2=normal,3=verbose,4=debug
 #
 USAGE=$'[-?\n@(#)$Id: 0.1\n]'
-USAGE+="[-author?Bond Masuda <bond.masuda@jlbond.com>]"
-USAGE+="[-copyright?Copyright (C) 2016 Bond Masuda. All Rights Reserved.]"
+USAGE+="[-author?Art of Server <the.art.of.server@gmail.com>]"
+USAGE+="[-copyright?Copyright (C) 2016 Art of Server. All Rights Reserved.]"
 USAGE+="[-license?GNU General Public License v3.]"
 USAGE+="[+NAME?ipcurfew --- ipcurfew restricts services based on your public IP.]"
 USAGE+="[+DESCRIPTION?ipcurfew restricts what services can or cannot run based "

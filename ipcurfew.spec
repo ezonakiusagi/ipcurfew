@@ -1,6 +1,6 @@
 #
 # RPM spec file for ipcurfew
-# Copyright (C) 2016 Bond Masuda. All rights reserved.
+# Copyright (C) 2016 Art of Server. All rights reserved.
 #
 
 Name:           ipcurfew
@@ -58,6 +58,6 @@ systemctl daemon-reload
 %attr(644,root,root) /lib/systemd/system/%{name}.service
 
 %changelog
-* Wed Aug 31 2016 Bond Masuda <bond.masuda@jlbond.com> - 0.1-1
+* Wed Aug 31 2016 Art of Server <the.art.of.server@gmail.com> - 0.1-1
 - 1st packaging
 
